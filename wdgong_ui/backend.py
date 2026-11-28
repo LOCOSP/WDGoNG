@@ -72,6 +72,9 @@ _AIRTAG_COUNT_RE = _re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*$")
 _BLE_SUMMARY_RE = _re.compile(
     r"Summary:\s*(\d+)\s*AirTags?,\s*(\d+)\s*SmartTags?", _re.IGNORECASE)
 
+# LoRa mesh settings (stack + per-stack region/preset/name), one per install folder.
+MESH_SETTINGS_NAME = ".watchdogs_mesh.json"
+
 REPO = _locate_repo()
 HAVE_BACKEND = False
 IMPORT_ERROR = ""
@@ -3372,7 +3375,7 @@ class Backend:
 
     # ---- mesh settings persistence (stack + per-stack region/band/preset/name) ----
     def _mesh_path(self):
-        return Path(self._app_dir) / ".watchdogs_mesh.json"
+        return Path(self._app_dir) / MESH_SETTINGS_NAME
 
     def _load_mesh_settings(self) -> None:
         self._mesh = {"stack": "", "mc_region": "eu_uk_default",
@@ -4894,6 +4897,9 @@ class Backend:
     # User-data backup / restore — ONE portable file with everything the
     # player owns: loot/ (XP, badges, totals, captures, passwords, portals,
     # whitelist, + the consolidated loot/reticulum chat identity) + secrets.conf
+    # + .watchdogs_mesh.json (LoRa mesh stack, MeshCore region, Meshtastic
+    # region/preset/name). That file lives in the install folder, so without it
+    # a move to a new install comes back on the EU defaults.
     # ==================================================================
     def _chown_user(self, path: str) -> None:
         """Hand a root-created file back to the login user so they can copy it
@@ -4920,6 +4926,7 @@ class Backend:
                 final = os.path.join(home, "wdgo-backup-%s.tar.gz" % ts)
                 loot = os.path.join(self._app_dir, "loot")
                 secrets = os.path.join(self._app_dir, "secrets.conf")
+                mesh = str(self._mesh_path())
                 self._term("[DATA] exporting backup...", "tx")
                 # Create a UNIQUE private file on a fresh descriptor: O_EXCL (mkstemp)
                 # never follows a symlink or truncates an existing file, and 0600 keeps
@@ -4946,6 +4953,8 @@ class Backend:
                                 tar.add(loot, arcname="loot")
                             if os.path.isfile(secrets):
                                 tar.add(secrets, arcname="secrets.conf")
+                            if os.path.isfile(mesh):
+                                tar.add(mesh, arcname=MESH_SETTINGS_NAME)
                     os.replace(tmp, final)    # atomic publish after the archive is closed
                     tmp = None
                 finally:
@@ -4966,9 +4975,9 @@ class Backend:
 
     @staticmethod
     def _safe_backup_member(m) -> bool:
-        """Accept ONLY regular files/dirs under loot/ or a single top-level
-        secrets.conf. Reject symlinks/hardlinks/devices, absolute paths, '..'
-        escapes and anything else — enforced on EVERY Python version (no reliance
+        """Accept ONLY regular files/dirs under loot/, or a single top-level
+        secrets.conf or .watchdogs_mesh.json. Reject symlinks/hardlinks/devices,
+        absolute paths, '..' escapes and anything else — enforced on EVERY Python version (no reliance
         on tar's data filter), so a crafted archive can never write app code."""
         name = m.name or ""
         if name.startswith("/") or "\\" in name or "\x00" in name:
@@ -4981,7 +4990,7 @@ class Backend:
         if not (m.isreg() or m.isdir()):     # no links/devices/fifos
             return False
         top = parts[0]
-        if top == "secrets.conf":
+        if top in ("secrets.conf", MESH_SETTINGS_NAME):
             return len(parts) == 1 and m.isreg()
         return top == "loot"
 
@@ -5021,6 +5030,7 @@ class Backend:
                         tar.extract(m, tmpdir, set_attrs=False)
                 new_loot = os.path.join(tmpdir, "loot")
                 new_secrets = os.path.join(tmpdir, "secrets.conf")
+                new_mesh = os.path.join(tmpdir, MESH_SETTINGS_NAME)
                 if not (os.path.isdir(new_loot) or os.path.isfile(new_secrets)):
                     raise ValueError("backup has no loot/ or secrets.conf")
 
@@ -5072,6 +5082,14 @@ class Backend:
                         _swap_in(new_secrets, sec_file, False)
                     except Exception as exc:
                         self._term("[DATA] secrets.conf not restored: %s" % exc, "warn")
+                if os.path.isfile(new_mesh):
+                    try:
+                        with open(new_mesh, encoding="utf-8") as f:
+                            if not isinstance(json.load(f), dict):
+                                raise ValueError("not a settings object")
+                        _swap_in(new_mesh, str(self._mesh_path()), False)
+                    except Exception as exc:
+                        self._term("[DATA] mesh settings not restored: %s" % exc, "warn")
                 self._term("[DATA] restored (previous data kept at *.pre-restore) - restarting...", "ok")
             except Exception as exc:
                 self._term("[DATA] restore failed - data left unchanged: %s" % exc, "warn")
